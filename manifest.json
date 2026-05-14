@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "GlassLinq",
+  "version": "1.0.0",
+  "description": "Native messaging bridge for GlassLinq Studio",
+  
+  "permissions": [
+    "nativeMessaging",
+    "scripting",
+    "activeTab"
+  ],
+  
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  
+  "action": {
+    "default_title": "GlassLinq",
+    "default_popup": "popup.html"
+  }
+}
