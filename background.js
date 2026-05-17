@@ -10,32 +10,57 @@ function connectNative() {
     try {
         nativePort = chrome.runtime.connectNative('com.glasslinq.bridge');
 
-        nativePort.onMessage.addListener((msg) => {
-            console.log('[GlassLinq] Received from Bridge:', msg);
+// background.js
+nativePort.onMessage.addListener((msg) => {
+    console.log('[GlassLinq] Received from Bridge:', msg);
 
-            // Handle start, stop, and web_spy_request actions
-            if (msg.action === "web_spy_request" || msg.action === "start_web_spy" || msg.action === "stop_web_spy") {
-                
-                // FIX: We remove 'lastFocusedWindow: true' because when you click 'Spy' in Studio, 
-                // Studio is the last focused window, and Chrome might be ignored.
-                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                    if (tabs && tabs.length > 0) {
-                        // Find the first tab that isn't a chrome:// settings page
-                        const targetTab = tabs.find(t => t.url && !t.url.startsWith('chrome://'));
-                        
-                        if (targetTab) {
-                            console.log(`[GlassLinq] Sending ${msg.action} to Tab ${targetTab.id}`);
-                            chrome.tabs.sendMessage(targetTab.id, msg).catch(err => {
-                                console.error("[GlassLinq] Content script unreachable:", err.message);
-                            });
-                        }
-                    } else {
-                        console.warn("[GlassLinq] No active browser tab found to receive command");
-                    }
-                });
+    // Process both design-time spying actions AND runtime execution actions
+    if (["web_spy_request", "start_web_spy", "stop_web_spy", "GET_TEXT", "CLICK", "TYPE_INTO"].includes(msg.action)) {
+        
+        // Query the active tab across ALL windows to ensure focus shift doesn't break target matching
+        chrome.tabs.query({ active: true }, (tabs) => {
+            if (!tabs || tabs.length === 0) {
+                console.warn("[GlassLinq] No active browser tab found to receive command");
+                return;
             }
-        });
 
+            // Find an eligible web tab (ignore chrome:// internal and restricted settings tabs)
+            const targetTab = tabs.find(t => t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('edge://'));
+            
+            if (!targetTab) {
+                console.warn("[GlassLinq] Target tab is restricted or invalid:", tabs[0]?.url);
+                return;
+            }
+
+            console.log(`[GlassLinq] Attempting to send command ${msg.action} to Tab ${targetTab.id}`);
+
+            // Try sending the message normally
+            chrome.tabs.sendMessage(targetTab.id, msg).catch((err) => {
+                // If "Receiving end does not exist", programmatic injection is required
+                if (err.message.includes("Receiving end does not exist")) {
+                    console.warn(`[GlassLinq] Content script missing on Tab ${targetTab.id}. Dynamically injecting content.js...`);
+
+                    // Script Injection via scripting API (Manifest V3 style standard compatibility)
+                    chrome.scripting.executeScript({
+                        target: { tabId: targetTab.id },
+                        files: ['content.js']
+                    }).then(() => {
+                        // Small delay to allow initialization, then retry sending the payload
+                        setTimeout(() => {
+                            chrome.tabs.sendMessage(targetTab.id, msg).catch(retryErr => {
+                                console.error("[GlassLinq] Dynamic retry failed:", retryErr.message);
+                            });
+                        }, 150);
+                    }).catch(injectErr => {
+                        console.error("[GlassLinq] Critical error inject failed:", injectErr.message);
+                    });
+                } else {
+                    console.error("[GlassLinq] Content script unreachable due to:", err.message);
+                }
+            });
+        });
+    }
+});
         nativePort.onDisconnect.addListener(() => {
             console.warn('[GlassLinq] Bridge Disconnected');
             nativePort = null;
@@ -65,15 +90,21 @@ function connectNative() {
 }
 
 // Listen for messages from content scripts (the selector data coming BACK from the page)
+// background.js
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[GlassLinq] Message from page:', message);
 
-if (message.action === "element_hovered" || message.action === "element_captured") {
+    const runtimeActions = [
+        "element_hovered", "element_captured", 
+        "GET_TEXT_RESPONSE", "CLICK_RESPONSE", "TYPE_INTO_RESPONSE"
+    ];
+
+    if (runtimeActions.includes(message.action)) {
         const port = connectNative();
         if (port) {
             try {
                 port.postMessage(message);
-                console.log('[GlassLinq] Selector forwarded to Bridge:', message.selector?.substring(0, 100) + '...');
+                console.log(`[GlassLinq] Action ${message.action} forwarded to Bridge.`);
                 sendResponse({ status: 'forwarded', success: true });
             } catch (error) {
                 console.error('[GlassLinq] Failed to forward message:', error);
