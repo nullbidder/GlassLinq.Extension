@@ -4,7 +4,7 @@
 (function() {
     'use strict';
 
-// ═══════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
     // STATE MANAGEMENT
     // ═══════════════════════════════════════════════════════════════
     let isSpying = false;
@@ -22,40 +22,41 @@
         // Listen for commands from background.js
         chrome.runtime.onMessage.addListener(handleMessage);
     }
-// ═══════════════════════════════════════════════════════════════
-// MESSAGE HANDLER (Start/Stop Spy Mode + Runtime Commands)
-// ═══════════════════════════════════════════════════════════════
-function handleMessage(message, sender, sendResponse) {
-    console.log('[GlassLinq Content] Received:', message);
 
-// Design-time commands (Safe to reply inline or drop)
-    if (message.action === 'start_web_spy' || message.action === 'web_spy_request') {
-        // FIX: Do not restart spying if we are locked waiting for Studio to acknowledge a capture
-        if (!captureLock) {
-            startSpying();
+    // ═══════════════════════════════════════════════════════════════
+    // MESSAGE HANDLER (Start/Stop Spy Mode + Runtime Commands)
+    // ═══════════════════════════════════════════════════════════════
+    function handleMessage(message, sender, sendResponse) {
+        console.log('[GlassLinq Content] Received:', message);
+
+        // Design-time commands (Safe to reply inline or drop)
+        if (message.action === 'start_web_spy' || message.action === 'web_spy_request') {
+            // FIX: Do not restart spying if we are locked waiting for Studio to acknowledge a capture
+            if (!captureLock) {
+                startSpying();
+            }
+            if (typeof sendResponse === 'function') sendResponse({ status: 'started' });
+        } 
+        else if (message.action === 'stop_web_spy') {
+            // FIX: Studio has sent the formal stop instruction, release the lock safely
+            captureLock = false;
+            stopSpying();
+            if (typeof sendResponse === 'function') sendResponse({ status: 'stopped' });
         }
-        if (typeof sendResponse === 'function') sendResponse({ status: 'started' });
-    } 
-    else if (message.action === 'stop_web_spy') {
-        // FIX: Studio has sent the formal stop instruction, release the lock safely
-        captureLock = false;
-        stopSpying();
-        if (typeof sendResponse === 'function') sendResponse({ status: 'stopped' });
-    }
-    // Runtime commands (No longer passing volatile sendResponse references)
-    else if (message.action === 'GET_TEXT') {
-        handleGetText(message);
-    }
-    else if (message.action === 'CLICK') {
-        handleClick(message);
-    }
-    else if (message.action === 'TYPE_INTO') {
-        handleTypeInto(message);
-    }
+        // Runtime commands (No longer passing volatile sendResponse references)
+        else if (message.action === 'GET_TEXT') {
+            handleGetText(message);
+        }
+        else if (message.action === 'CLICK') {
+            handleClick(message);
+        }
+        else if (message.action === 'TYPE_INTO') {
+            handleTypeInto(message);
+        }
 
-    // Do NOT return true; let this invocation finish synchronously
-    return false;
-}
+        // Do NOT return true; let this invocation finish synchronously
+        return false;
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // CREATE HIGHLIGHT OVERLAY
@@ -159,7 +160,7 @@ function handleMessage(message, sender, sendResponse) {
     // ═══════════════════════════════════════════════════════════════
     // CLICK CAPTURE (Intercept and Capture Final Element)
     // ═══════════════════════════════════════════════════════════════
-function onClickCapture(event) {
+    function onClickCapture(event) {
         if (!isSpying) return;
 
         // Prevent the default action (navigation, form submit, etc.)
@@ -173,14 +174,18 @@ function onClickCapture(event) {
         // Build final clean selector
         const selector = buildUiPathSelector(element);
 
+        // CALCULATION AT RUNTIME: Compute the web anchor silently on click selection
+        const anchorSelector = findWebAnchor(element);
+
         // FIX: Immediately lock spying states so that lingering 'web_spy_request' messages 
         // in transit don't spin the crosshair/highlighter window back up before Studio responds.
         captureLock = true;
 
-        // Send capture event to Studio
+        // Send capture event to Studio, passing the calculated anchor selector
         chrome.runtime.sendMessage({
             action: 'element_captured',
             selector: selector,
+            anchorSelector: anchorSelector, // <--- INTEGRATED: Safely sent over native messaging bridge
             tag: element.tagName,
             text: element.textContent?.trim().substring(0, 50) || '',
             timestamp: Date.now()
@@ -227,11 +232,20 @@ function onClickCapture(event) {
             attributes.push(`id='${cleanAttributeValue(element.id)}'`);
         }
 
-        // Class (CLEANED - remove glasslinq-highlight)
+        // Inside content.js -> buildUiPathSelector() where classes are filtered:
         if (element.className && typeof element.className === 'string') {
             const cleanedClass = element.className
                 .split(/\s+/)
-                .filter(cls => cls && cls !== 'glasslinq-highlight')  // CRITICAL FIX
+                .filter(cls => {
+                    return cls && 
+                        cls !== 'glasslinq-highlight' &&
+                        !cls.startsWith('ng-') &&            // Strips Angular state flags
+                        !cls.includes('valid') &&            // Strips form validation states
+                        !cls.includes('invalid') &&
+                        !cls.includes('pristine') &&
+                        !cls.includes('dirty') &&
+                        !cls.includes('touched');
+                })
                 .join(' ')
                 .trim();
             
@@ -328,142 +342,143 @@ function onClickCapture(event) {
      * Parses UiPath-style selector and extracts text from matching element
      */
     function handleGetText(message) {
-    console.log('[GlassLinq Content] Executing GET_TEXT:', message);
+        console.log('[GlassLinq Content] Executing GET_TEXT:', message);
 
-    try {
-        const selector = message.selector;
-        const transactionId = message.transactionId;
-        const element = findElementBySelector(selector);
+        try {
+            const selector = message.selector;
+            const transactionId = message.transactionId;
+            const element = findElementBySelector(selector);
 
-        if (!element) {
+            if (!element) {
+                chrome.runtime.sendMessage({
+                    action: 'GET_TEXT_RESPONSE',
+                    transactionId: transactionId,
+                    success: false,
+                    error: 'Element not found'
+                });
+                return;
+            }
+
+            let text = '';
+            if (element.value !== undefined && element.value !== null && element.tagName === 'INPUT') {
+                text = element.value;
+            } else if (element.innerText) {
+                text = element.innerText.trim();
+            } else if (element.textContent) {
+                text = element.textContent.trim();
+            } else if (element.getAttribute('value')) {
+                text = element.getAttribute('value');
+            }
+
+            console.log('[GlassLinq Content] Extracted text:', text);
+
+            // Explicitly relay to background script
             chrome.runtime.sendMessage({
                 action: 'GET_TEXT_RESPONSE',
                 transactionId: transactionId,
-                success: false,
-                error: 'Element not found'
+                success: true,
+                text: text,
+                tag: element.tagName,
+                timestamp: Date.now()
             });
-            return;
+
+        } catch (error) {
+            console.error('[GlassLinq Content] GET_TEXT error:', error);
+            chrome.runtime.sendMessage({
+                action: 'GET_TEXT_RESPONSE',
+                transactionId: message.transactionId,
+                success: false,
+                error: error.message || 'Unknown error'
+            });
         }
-
-        let text = '';
-        if (element.value !== undefined && element.value !== null && element.tagName === 'INPUT') {
-            text = element.value;
-        } else if (element.innerText) {
-            text = element.innerText.trim();
-        } else if (element.textContent) {
-            text = element.textContent.trim();
-        } else if (element.getAttribute('value')) {
-            text = element.getAttribute('value');
-        }
-
-        console.log('[GlassLinq Content] Extracted text:', text);
-
-        // Explicitly relay to background script
-        chrome.runtime.sendMessage({
-            action: 'GET_TEXT_RESPONSE',
-            transactionId: transactionId,
-            success: true,
-            text: text,
-            tag: element.tagName,
-            timestamp: Date.now()
-        });
-
-    } catch (error) {
-        console.error('[GlassLinq Content] GET_TEXT error:', error);
-        chrome.runtime.sendMessage({
-            action: 'GET_TEXT_RESPONSE',
-            transactionId: message.transactionId,
-            success: false,
-            error: error.message || 'Unknown error'
-        });
     }
-}
 
     /**
      * Handle CLICK runtime command
      * Parses selector and clicks the matching element
      */
-  function handleClick(message) {
-    console.log('[GlassLinq Content] Executing CLICK:', message);
+    function handleClick(message) {
+        console.log('[GlassLinq Content] Executing CLICK:', message);
 
-    try {
-        const element = findElementBySelector(message.selector);
+        try {
+            const element = findElementBySelector(message.selector);
 
-        if (!element) {
+            if (!element) {
+                chrome.runtime.sendMessage({
+                    action: 'CLICK_RESPONSE',
+                    transactionId: message.transactionId,
+                    success: false,
+                    error: 'Element not found'
+                });
+                return;
+            }
+
+            element.click();
+
+            chrome.runtime.sendMessage({
+                action: 'CLICK_RESPONSE',
+                transactionId: message.transactionId,
+                success: true,
+                timestamp: Date.now()
+            });
+
+        } catch (error) {
+            console.error('[GlassLinq Content] CLICK error:', error);
             chrome.runtime.sendMessage({
                 action: 'CLICK_RESPONSE',
                 transactionId: message.transactionId,
                 success: false,
-                error: 'Element not found'
+                error: error.message
             });
-            return;
         }
-
-        element.click();
-
-        chrome.runtime.sendMessage({
-            action: 'CLICK_RESPONSE',
-            transactionId: message.transactionId,
-            success: true,
-            timestamp: Date.now()
-        });
-
-    } catch (error) {
-        console.error('[GlassLinq Content] CLICK error:', error);
-        chrome.runtime.sendMessage({
-            action: 'CLICK_RESPONSE',
-            transactionId: message.transactionId,
-            success: false,
-            error: error.message
-        });
     }
-}
 
     /**
      * Handle TYPE_INTO runtime command
      * Parses selector and types text into the matching element
      */
-function handleTypeInto(message) {
-    console.log('[GlassLinq Content] Executing TYPE_INTO:', message);
+    function handleTypeInto(message) {
+        console.log('[GlassLinq Content] Executing TYPE_INTO:', message);
 
-    try {
-        const element = findElementBySelector(message.selector);
+        try {
+            const element = findElementBySelector(message.selector);
 
-        if (!element) {
+            if (!element) {
+                chrome.runtime.sendMessage({
+                    action: 'TYPE_INTO_RESPONSE',
+                    transactionId: message.transactionId,
+                    success: false,
+                    error: 'Element not found'
+                });
+                return;
+            }
+
+            if (message.emptyField) {
+                element.value = '';
+            }
+
+            element.value = message.text || '';
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+
+            chrome.runtime.sendMessage({
+                action: 'TYPE_INTO_RESPONSE',
+                transactionId: message.transactionId,
+                success: true,
+                timestamp: Date.now()
+            });
+
+        } catch (error) {
+            console.error('[GlassLinq Content] TYPE_INTO error:', error);
             chrome.runtime.sendMessage({
                 action: 'TYPE_INTO_RESPONSE',
                 transactionId: message.transactionId,
                 success: false,
-                error: 'Element not found'
+                error: error.message
             });
-            return;
         }
-
-        if (message.emptyField) {
-            element.value = '';
-        }
-
-        element.value = message.text || '';
-        element.dispatchEvent(new Event('input', { bubbles: true }));
-        element.dispatchEvent(new Event('change', { bubbles: true }));
-
-        chrome.runtime.sendMessage({
-            action: 'TYPE_INTO_RESPONSE',
-            transactionId: message.transactionId,
-            success: true,
-            timestamp: Date.now()
-        });
-
-    } catch (error) {
-        console.error('[GlassLinq Content] TYPE_INTO error:', error);
-        chrome.runtime.sendMessage({
-            action: 'TYPE_INTO_RESPONSE',
-            transactionId: message.transactionId,
-            success: false,
-            error: error.message
-        });
     }
-}
+
     /**
      * Parse UiPath-style XML selector and find matching DOM element
      * Example: <webctrl tag='INPUT' id='username' />
@@ -542,6 +557,119 @@ function handleTypeInto(message) {
         return candidates[0];
     }
 
+// ═══════════════════════════════════════════════════════════════
+    // INTELLECTUAL WEB ANCHOR HEURISTIC ENGINE (FLOATING LABEL PROXIMITY)
+    // ═══════════════════════════════════════════════════════════════
+    function findWebAnchor(clickedElement) {
+        // Only seek anchors for input-style fields
+        const targetTag = clickedElement.tagName.toUpperCase();
+        if (targetTag !== 'INPUT' && targetTag !== 'TEXTAREA' && targetTag !== 'SELECT') {
+            return "";
+        }
+
+        // Rule 1: Check for explicit HTML 'for' attribute mapping
+        if (clickedElement.id) {
+            const explicitLabel = document.querySelector(`label[for="${clickedElement.id}"]`);
+            if (explicitLabel && explicitLabel.innerText.trim()) {
+                const txt = explicitLabel.innerText.trim().replace(/'/g, "\\'");
+                return `<webctrl aaname='${txt}' tag='LABEL' check:innerText='${txt}' />`;
+            }
+        }
+
+        // Rule 2: Check if input is nested cleanly inside a <label> wrapper tag
+        const parentLabel = clickedElement.closest('label');
+        if (parentLabel) {
+            let text = "";
+            parentLabel.childNodes.forEach(node => {
+                if (node.nodeType === Node.TEXT_NODE) text += node.textContent;
+                else if (node.nodeType === Node.ELEMENT_NODE && node !== clickedElement) text += node.innerText;
+            });
+            text = text.trim().replace(/'/g, "\\'");
+            if (text && text.length < 40) {
+                return `<webctrl aaname='${text}' tag='LABEL' check:innerText='${text}' />`;
+            }
+        }
+
+        // Rule 3: Form Wrapper / Isolated Sibling Matching (Handles Floating Labels Safely)
+        // Look up for localized frame layout containers while avoiding giant grid/row containers
+        let formContainer = clickedElement.closest('.form-group, .form-field, .input-container, .field-wrapper, .form-floating, .mat-form-field');
+        
+        // Fallback: If no known CSS layout framework class is found, scope down tightly to immediate parent element
+        if (!formContainer) {
+            formContainer = clickedElement.parentElement;
+        }
+
+        if (formContainer && formContainer !== document.body && formContainer !== document.documentElement) {
+            // Find short text elements inside this container box *only*
+            const internalLabels = formContainer.querySelectorAll('label, div.form-label, span, p');
+            for (let label of internalLabels) {
+                const txt = label.innerText ? label.innerText.trim() : "";
+                
+                // Ensure it's valid label text, not empty, and not the clicked element itself
+                if (txt && txt.length > 0 && txt.length < 40 && label !== clickedElement) {
+                    const cleanTxt = txt.replace(/'/g, "\\'");
+                    console.log(`[GlassLinq] Isolated Container Anchor Found: ${cleanTxt} (${label.tagName})`);
+                    return `<webctrl aaname='${cleanTxt}' tag='${label.tagName.toUpperCase()}' check:innerText='${cleanTxt}' />`;
+                }
+            }
+        }
+
+        // Rule 4: Intelligent Directional Proximity Map (Fallback)
+        const candidates = document.querySelectorAll('label, span, th, td, p, div.form-label');
+        let closestAnchor = null;
+        let minDistance = 250; // Max search radius in pixels
+        const inputRect = clickedElement.getBoundingClientRect();
+        
+        const inputCenter = {
+            x: inputRect.left + inputRect.width / 2,
+            y: inputRect.top + inputRect.height / 2
+        };
+
+        candidates.forEach(candidate => {
+            const text = candidate.innerText ? candidate.innerText.trim() : "";
+            // Ignore blank nodes, large headers, or parent containers holding the target
+            if (!text || text.length > 40 || candidate.contains(clickedElement)) return;
+
+            const candidateRect = candidate.getBoundingClientRect();
+            const candidateCenter = {
+                x: candidateRect.left + candidateRect.width / 2,
+                y: candidateRect.top + candidateRect.height / 2
+            };
+
+            // Calculate directional distance offsets
+            const deltaX = inputCenter.x - candidateCenter.x; // Positive means candidate is to the LEFT
+            const deltaY = inputCenter.y - candidateCenter.y; // Positive means candidate is ABOVE
+
+            // DIRECTIONAL REJECTION CRITICAL FOR FLOATING LAYOUTS:
+            // If the text block is located completely BELOW the target input box, reject it instantly
+            if (deltaY < -15) return; 
+            
+            // If the text block is located significantly to the RIGHT of the target input box, reject it
+            if (deltaX < -30) return;
+
+            // Compute math hypotenuse
+            let distance = Math.hypot(deltaX, deltaY);
+            
+            // Bias: Give a visual advantage bonus to label items sitting cleanly to the left inline on the same row
+            if (deltaX > 0 && Math.abs(deltaY) < 20) {
+                distance *= 0.75; 
+            }
+
+            if (distance < minDistance) {
+                minDistance = distance;
+                closestAnchor = candidate;
+            }
+        });
+
+        if (closestAnchor) {
+            const txt = closestAnchor.innerText.trim().replace(/'/g, "\\'");
+            console.log(`[GlassLinq] Geometrical Proximity Anchor Found: ${txt} (${closestAnchor.tagName})`);
+            return `<webctrl aaname='${txt}' tag='${closestAnchor.tagName.toUpperCase()}' check:innerText='${txt}' />`;
+        }
+
+        return "";
+    }
+
     /**
      * Parse XML-style selector string into attribute object
      * Example: "<webctrl tag='INPUT' id='username' />" 
@@ -551,7 +679,7 @@ function handleTypeInto(message) {
         const attributes = {};
 
         // Extract all attribute="value" or attribute='value' pairs
-        const regex = /(\w+(?:-\w+)*)=['"]([^'"]+)['"]/g;
+        const regex = /(\w+(?:-\w+)*)=['"]([^'\"]+)['"]/g;
         let match;
 
         while ((match = regex.exec(xmlString)) !== null) {
