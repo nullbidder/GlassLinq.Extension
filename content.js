@@ -168,7 +168,7 @@
         event.stopPropagation();
 
         const element = event.target;
-        
+
         console.log('[GlassLinq Content] Element CAPTURED:', element);
 
         // Build final clean selector
@@ -177,15 +177,19 @@
         // CALCULATION AT RUNTIME: Compute the web anchor silently on click selection
         const anchorSelector = findWebAnchor(element);
 
+        // ─── NEW: GENERATE CSS SELECTOR ───
+        const cssSelector = generateCssSelector(element);
+
         // FIX: Immediately lock spying states so that lingering 'web_spy_request' messages 
         // in transit don't spin the crosshair/highlighter window back up before Studio responds.
         captureLock = true;
 
-        // Send capture event to Studio, passing the calculated anchor selector
+        // Send capture event to Studio, passing the calculated anchor and css selectors
         chrome.runtime.sendMessage({
             action: 'element_captured',
             selector: selector,
-            anchorSelector: anchorSelector, // <--- INTEGRATED: Safely sent over native messaging bridge
+            anchorSelector: anchorSelector,
+            cssSelector: cssSelector, // <─── INTEGRATED: Sent over native messaging bridge
             tag: element.tagName,
             text: element.textContent?.trim().substring(0, 50) || '',
             timestamp: Date.now()
@@ -199,6 +203,45 @@
 
         // Stop spying after capture
         stopSpying();
+    }
+
+    /**
+     * Generates a structural CSS Selector path matching UiPath formatting:
+     * Escapes '>' chars into '&gt;' and utilizes tag names with sequential :nth-of-type structural indices.
+     */
+    function generateCssSelector(el) {
+        if (!(el instanceof Element)) return "";
+        const path = [];
+        const targetTag = el.tagName.toUpperCase();
+
+        while (el && el.nodeType === Node.ELEMENT_NODE) {
+            let nodeName = el.nodeName.toLowerCase();
+            let selector = nodeName;
+
+            if (el.id) {
+                // IDs are globally unique root points, stop climbing if found
+                selector += '#' + el.id;
+                path.unshift(selector);
+                break;
+            } else {
+                // Find positional child index among matching tag names
+                let sibling = el;
+                let nth = 1;
+                while (sibling = sibling.previousElementSibling) {
+                    if (sibling.nodeName.toLowerCase() === nodeName) {
+                        nth++;
+                    }
+                }
+                // Append positional locator index
+                selector += `:nth-of-type(${nth})`;
+            }
+            path.unshift(selector);
+            el = el.parentNode;
+        }
+
+        // Join elements using the escaped &gt; separator string format
+        const fullCssPath = path.join('&gt;');
+        return `<webctrl css-selector='${fullCssPath}' tag='${targetTag}' />`;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -217,6 +260,10 @@
         highlightOverlay.style.width = rect.width + 'px';
         highlightOverlay.style.height = rect.height + 'px';
     }
+
+
+
+
 
     // ═══════════════════════════════════════════════════════════════
     // BUILD UIPATH-STYLE SELECTOR (Clean & Stable)
@@ -701,3 +748,4 @@
     }
 
 })();
+
