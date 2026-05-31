@@ -485,124 +485,138 @@
      * Parses selector and types text into the matching element
      */
     function handleTypeInto(message) {
-        console.log('[GlassLinq Content] Executing TYPE_INTO:', message);
+    console.log('[GlassLinq Content] Executing TYPE_INTO:', message);
 
-        try {
-            const element = findElementBySelector(message.selector);
+    try {
+        const element = findElementBySelector(message.selector);
 
-            if (!element) {
-                chrome.runtime.sendMessage({
-                    action: 'TYPE_INTO_RESPONSE',
-                    transactionId: message.transactionId,
-                    success: false,
-                    error: 'Element not found'
-                });
-                return;
-            }
-
-            if (message.emptyField) {
-                element.value = '';
-            }
-
-            element.value = message.text || '';
-            element.dispatchEvent(new Event('input', { bubbles: true }));
-            element.dispatchEvent(new Event('change', { bubbles: true }));
-
-            chrome.runtime.sendMessage({
-                action: 'TYPE_INTO_RESPONSE',
-                transactionId: message.transactionId,
-                success: true,
-                timestamp: Date.now()
-            });
-
-        } catch (error) {
-            console.error('[GlassLinq Content] TYPE_INTO error:', error);
+        if (!element) {
             chrome.runtime.sendMessage({
                 action: 'TYPE_INTO_RESPONSE',
                 transactionId: message.transactionId,
                 success: false,
-                error: error.message
+                error: 'Element not found'
             });
+            return;
         }
+
+        // Focus the element first so React/MUI registers it as active
+        element.focus();
+
+        if (message.emptyField) {
+            // Use the native input value setter to bypass React's controlled
+            // input tracking, then fire an input event to sync React state
+            const nativeInputSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value'
+            ).set;
+            nativeInputSetter.call(element, '');
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        // Set value via native prototype setter so React detects the change
+        const nativeInputSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value'
+        ).set;
+        nativeInputSetter.call(element, message.text || '');
+
+        // Fire the full synthetic event chain React/MUI expects:
+        // input → change → keydown/keyup for autocomplete trigger
+        element.dispatchEvent(new Event('input',  { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+
+        // For MUI Autocomplete specifically: it listens on keydown to open
+        // the dropdown. Dispatching a benign key event unblocks it.
+        element.dispatchEvent(new KeyboardEvent('keydown', {
+            bubbles: true, cancelable: true, key: 'ArrowDown', keyCode: 40
+        }));
+        element.dispatchEvent(new KeyboardEvent('keyup', {
+            bubbles: true, cancelable: true, key: 'ArrowDown', keyCode: 40
+        }));
+
+        chrome.runtime.sendMessage({
+            action: 'TYPE_INTO_RESPONSE',
+            transactionId: message.transactionId,
+            success: true,
+            timestamp: Date.now()
+        });
+
+    } catch (error) {
+        console.error('[GlassLinq Content] TYPE_INTO error:', error);
+        chrome.runtime.sendMessage({
+            action: 'TYPE_INTO_RESPONSE',
+            transactionId: message.transactionId,
+            success: false,
+            error: error.message
+        });
     }
+}
 
     /**
      * Parse UiPath-style XML selector and find matching DOM element
      * Example: <webctrl tag='INPUT' id='username' />
      * Example: <webctrl tag='SPAN' class='price' aaname='$19.99' />
      */
-    function findElementBySelector(xmlSelector) {
-        console.log('[GlassLinq Content] Parsing selector:', xmlSelector);
+   function findElementBySelector(xmlSelector) {
+    console.log('[GlassLinq Content] Parsing selector:', xmlSelector);
 
-        // Extract attributes from the XML selector
-        const attributes = parseXmlSelector(xmlSelector);
+    const attributes = parseXmlSelector(xmlSelector);
 
-        if (!attributes.tag) {
-            console.error('[GlassLinq Content] No tag specified in selector');
-            return null;
-        }
-
-        // Build CSS selector
-        let cssSelector = attributes.tag.toLowerCase();
-
-        if (attributes.id) {
-            cssSelector += `#${CSS.escape(attributes.id)}`;
-        }
-
-        if (attributes.class) {
-            const classes = attributes.class.split(/\s+/).filter(c => c);
-            classes.forEach(cls => {
-                cssSelector += `.${CSS.escape(cls)}`;
-            });
-        }
-
-        if (attributes.name) {
-            cssSelector += `[name="${CSS.escape(attributes.name)}"]`;
-        }
-
-        if (attributes.type) {
-            cssSelector += `[type="${CSS.escape(attributes.type)}"]`;
-        }
-
-        console.log('[GlassLinq Content] Built CSS selector:', cssSelector);
-
-        // Find all matching elements
-        let candidates = Array.from(document.querySelectorAll(cssSelector));
-
-        if (candidates.length === 0) {
-            console.warn('[GlassLinq Content] No elements found for selector:', cssSelector);
-            return null;
-        }
-
-        // Filter by additional attributes if needed
-        if (attributes.aaname) {
-            candidates = candidates.filter(el => {
-                const text = (el.innerText || el.textContent || '').trim();
-                return text.includes(attributes.aaname);
-            });
-        }
-
-        if (attributes['aria-label']) {
-            candidates = candidates.filter(el => {
-                return el.getAttribute('aria-label') === attributes['aria-label'];
-            });
-        }
-
-        if (attributes.role) {
-            candidates = candidates.filter(el => {
-                return el.getAttribute('role') === attributes.role;
-            });
-        }
-
-        if (candidates.length === 0) {
-            console.warn('[GlassLinq Content] No elements matched after filtering');
-            return null;
-        }
-
-        // Return the first matching element
-        console.log('[GlassLinq Content] Found element:', candidates[0]);
-        return candidates[0];
+    if (!attributes.tag) {
+        console.error('[GlassLinq Content] No tag specified in selector');
+        return null;
     }
+
+    // Build the leanest possible CSS selector.
+    // If a stable id is present, use ONLY tag + id — never append class,
+    // because MUI/Ember class strings contain generated hashes (css-XXXXXXX)
+    // that change on every page load and will cause querySelector to return null.
+    let cssSelector = attributes.tag.toLowerCase();
+
+    if (attributes.id) {
+        cssSelector += `#${CSS.escape(attributes.id)}`;
+        // Stop here — id is globally unique, no further attributes needed.
+        const element = document.querySelector(cssSelector);
+        console.log(`[GlassLinq Content] ID-based lookup "${cssSelector}":`, element);
+        return element;
+    }
+
+    // No id — build selector from stable attributes only,
+    // skipping class entirely to avoid volatile MUI hash tokens.
+    if (attributes.name) {
+        cssSelector += `[name="${CSS.escape(attributes.name)}"]`;
+    }
+
+    if (attributes.type) {
+        cssSelector += `[type="${CSS.escape(attributes.type)}"]`;
+    }
+
+    if (attributes.role) {
+        cssSelector += `[role="${CSS.escape(attributes.role)}"]`;
+    }
+
+    if (attributes['aria-label']) {
+        cssSelector += `[aria-label="${CSS.escape(attributes['aria-label'])}"]`;
+    }
+
+    console.log('[GlassLinq Content] Attribute-based lookup:', cssSelector);
+
+    let candidates = Array.from(document.querySelectorAll(cssSelector));
+
+    // Post-filter by aaname/innerText if present
+    if (attributes.aaname && candidates.length > 1) {
+        candidates = candidates.filter(el =>
+            (el.innerText || el.textContent || '').trim().includes(attributes.aaname)
+        );
+    }
+
+    if (candidates.length === 0) {
+        console.warn('[GlassLinq Content] No elements found for selector:', cssSelector);
+        return null;
+    }
+
+    console.log('[GlassLinq Content] Found element:', candidates[0]);
+    return candidates[0];
+}
 
 // ═══════════════════════════════════════════════════════════════
     // INTELLECTUAL WEB ANCHOR HEURISTIC ENGINE (FLOATING LABEL PROXIMITY)
