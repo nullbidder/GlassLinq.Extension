@@ -36,9 +36,11 @@
             stopSpying();
             if (typeof sendResponse === 'function') sendResponse({ status: 'stopped' });
         }
-        else if (message.action === 'GET_TEXT')   { handleGetText(message); }
-        else if (message.action === 'CLICK')      { handleClick(message); }
-        else if (message.action === 'TYPE_INTO')  { handleTypeInto(message); }
+        else if (message.action === 'GET_TEXT') { handleGetText(message); }
+        else if (message.action === 'CLICK') { handleClick(message); }
+        else if (message.action === 'TYPE_INTO') { handleTypeInto(message); }
+        else if (message.action === 'GET_ELEMENT_COUNT') { handleGetElementCount(message); }
+        else if (message.action === 'GET_ELEMENT_ATTRIBUTE') { handleGetElementAttribute(message); }
 
         return false;
     }
@@ -69,9 +71,9 @@
         const scrollX = window.pageXOffset || document.documentElement.scrollLeft;
         const scrollY = window.pageYOffset || document.documentElement.scrollTop;
         highlightOverlay.style.display = 'block';
-        highlightOverlay.style.left  = (rect.left + scrollX) + 'px';
-        highlightOverlay.style.top   = (rect.top  + scrollY) + 'px';
-        highlightOverlay.style.width  = rect.width  + 'px';
+        highlightOverlay.style.left = (rect.left + scrollX) + 'px';
+        highlightOverlay.style.top = (rect.top + scrollY) + 'px';
+        highlightOverlay.style.width = rect.width + 'px';
         highlightOverlay.style.height = rect.height + 'px';
     }
 
@@ -83,8 +85,8 @@
         isSpying = true;
         lastHighlightedElement = null;
         console.log('[GlassLinq Content] Web Spy ACTIVATED');
-        document.addEventListener('mousemove', onMouseMove,    true);
-        document.addEventListener('click',     onClickCapture, true);
+        document.addEventListener('mousemove', onMouseMove, true);
+        document.addEventListener('click', onClickCapture, true);
         document.body.style.cursor = 'crosshair';
     }
 
@@ -93,8 +95,8 @@
         isSpying = false;
         lastHighlightedElement = null;
         console.log('[GlassLinq Content] Web Spy DEACTIVATED');
-        document.removeEventListener('mousemove', onMouseMove,    true);
-        document.removeEventListener('click',     onClickCapture, true);
+        document.removeEventListener('mousemove', onMouseMove, true);
+        document.removeEventListener('click', onClickCapture, true);
         if (highlightOverlay) highlightOverlay.style.display = 'none';
         document.body.style.cursor = '';
     }
@@ -126,7 +128,7 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // CLICK CAPTURE — emit unified <webctrl /> selector
+    // CLICK CAPTURE — emit distinct properties
     // ═══════════════════════════════════════════════════════════════
     function onClickCapture(event) {
         if (!isSpying) return;
@@ -136,23 +138,26 @@
         const element = event.target;
         console.log('[GlassLinq Content] Element CAPTURED:', element);
 
-        // Build the single unified XML selector tag
+        // 1. Build your lightweight tag + attribute fallback selector
+        const lightweightSelector = buildUiPathSelector(element);
+
+        // 2. Build the structural, robust tier-resolved selector 
         const unifiedSelector = buildUnifiedSelector(element);
 
-        // Anchor (proximity label / for= label)
         const anchorSelector = findWebAnchor(element);
+        const { rawPath: rawCssPath } = buildCssPath(element);
 
         captureLock = true;
 
         chrome.runtime.sendMessage({
-            action:          'element_captured',
-            selector:        unifiedSelector,   // ← the ONE unified <webctrl … /> tag
-            anchorSelector:  anchorSelector,
-            // cssSelector kept for backward compat with SpyOverlayWindow CSS-selector field
-            cssSelector:     unifiedSelector,
-            tag:             element.tagName,
-            text:            element.textContent?.trim().substring(0, 50) || '',
-            timestamp:       Date.now()
+            action: 'element_captured',
+            selector: lightweightSelector, // Changing this fixes your main Selector panel property!
+            anchorSelector: anchorSelector,
+            cssSelector: unifiedSelector,  // Keeps strict layout path mapping safe in CssSelector field
+            rawCssSelector: rawCssPath,
+            tag: element.tagName,
+            text: element.textContent?.trim().substring(0, 50) || '',
+            timestamp: Date.now()
         }, (response) => {
             if (chrome.runtime.lastError) {
                 console.error('[GlassLinq Content] Send error:', chrome.runtime.lastError);
@@ -163,7 +168,6 @@
 
         stopSpying();
     }
-
     // ═══════════════════════════════════════════════════════════════
     // UNIFIED SELECTOR BUILDER
     //
@@ -186,14 +190,14 @@
     function buildUnifiedSelector(el) {
         if (!(el instanceof Element)) return '';
 
-        const tag         = el.tagName.toUpperCase();
-        const attrs       = [];
+        const tag = el.tagName.toUpperCase();
+        const attrs = [];
 
         // ── 1. Structural CSS path ────────────────────────────────
         const { escapedPath, rawPath, idx, parentId } = buildCssPath(el);
 
         if (escapedPath) attrs.push(`css-selector='${escapedPath}'`);
-        if (parentId)    attrs.push(`parentid='${escapeXml(parentId)}'`);
+        if (parentId) attrs.push(`parentid='${escapeXml(parentId)}'`);
 
         // ── 2. Tag (always) ───────────────────────────────────────
         attrs.push(`tag='${tag}'`);
@@ -204,12 +208,12 @@
         }
 
         // ── 4. Descriptive attributes ─────────────────────────────
-        if (el.name)                           attrs.push(`name='${escapeXml(el.name)}'`);
-        if (el.type)                           attrs.push(`type='${escapeXml(el.type)}'`);
-        if (el.getAttribute('role'))           attrs.push(`role='${escapeXml(el.getAttribute('role'))}'`);
-        if (el.getAttribute('aria-label'))     attrs.push(`aria-label='${escapeXml(el.getAttribute('aria-label'))}'`);
-        if (el.getAttribute('data-testid'))    attrs.push(`data-testid='${escapeXml(el.getAttribute('data-testid'))}'`);
-        if (el.getAttribute('placeholder'))    attrs.push(`placeholder='${escapeXml(el.getAttribute('placeholder').substring(0, 60))}'`);
+        if (el.name) attrs.push(`name='${escapeXml(el.name)}'`);
+        if (el.type) attrs.push(`type='${escapeXml(el.type)}'`);
+        if (el.getAttribute('role')) attrs.push(`role='${escapeXml(el.getAttribute('role'))}'`);
+        if (el.getAttribute('aria-label')) attrs.push(`aria-label='${escapeXml(el.getAttribute('aria-label'))}'`);
+        if (el.getAttribute('data-testid')) attrs.push(`data-testid='${escapeXml(el.getAttribute('data-testid'))}'`);
+        if (el.getAttribute('placeholder')) attrs.push(`placeholder='${escapeXml(el.getAttribute('placeholder').substring(0, 60))}'`);
 
         // ── 5. Inner text (aaname) ────────────────────────────────
         const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
@@ -224,27 +228,39 @@
     }
 
     /**
-     * Walk the DOM upward from `el` to build a plain tag-name CSS path.
+     * Walk the DOM upward from `el` to build a CSS path.
      * Returns: { escapedPath, rawPath, idx, parentId }
      *
-     * Strategy mirrors UiPath: tag names only (no :nth-of-type). The correct
-     * element is later identified by idx inside querySelectorAll(rawPath).
-     * If a stable ancestor id is found while climbing, it is captured as parentId.
+     * Key behaviour — stop at the first stable ancestor id:
+     *   Instead of always climbing to <body>, we stop as soon as we find
+     *   an ancestor whose id passes isVolatileId(). The path is then rooted
+     *   at "#stableId > ... > tag" rather than "body > div > div > ...".
+     *
+     *   This mirrors how UiPath uses parentid — a short, anchor-rooted path
+     *   like "#desktop-3 > ul > li > span > a > img" is far more resilient
+     *   than a 10-deep anonymous-div chain from body.
+     *
+     *   idx is calculated within the scoped root (the stable ancestor element
+     *   or document when no stable ancestor exists) so it stays correct.
      */
     function buildCssPath(el) {
         const originalEl = el;
-        const segments   = [];
-        let current      = el;
-        let parentId     = '';
+        const segments = [];   // tag names from el upward, reversed at end
+        let current = el;
+        let parentId = '';   // stable ancestor id when found
+        let anchorElement = null; // the DOM element whose id is parentId
 
         while (current && current.nodeType === Node.ELEMENT_NODE) {
             const nodeName = current.nodeName.toLowerCase();
             if (nodeName === 'html') break;
+
             segments.push(nodeName);
 
-            // Capture first stable ancestor id (skip the target element itself)
+            // Check ancestors (not the element itself) for a stable id.
             if (!parentId && current !== originalEl && current.id && !isVolatileId(current.id)) {
                 parentId = current.id;
+                anchorElement = current;
+                break;  // ← Stop climbing. We have a stable root.
             }
 
             if (nodeName === 'body') break;
@@ -254,13 +270,37 @@
         }
 
         segments.reverse();
-        const rawPath     = segments.join('>');
-        const escapedPath = segments.join('&gt;');  // safe for XML attribute value
 
+        let rawPath, escapedPath;
+
+        if (parentId) {
+            // Root the path at the stable id anchor, e.g.:
+            //   "#desktop-3 > ul > li > span > a > img"
+            // segments[0] is the anchor tag itself — drop it and prepend the id selector.
+            const relativeSegments = segments.slice(1);  // everything below the anchor
+            rawPath = relativeSegments.length > 0
+                ? `#${parentId} > ${relativeSegments.join(' > ')}`
+                : `#${parentId}`;
+            escapedPath = relativeSegments.length > 0
+                ? `#${parentId} &gt; ${relativeSegments.join(' &gt; ')}`
+                : `#${parentId}`;
+        } else {
+            // No stable ancestor — fall back to the original body-rooted path.
+            rawPath = segments.join('>');
+            escapedPath = segments.join('&gt;');
+        }
+
+        // Calculate idx scoped to the anchor element (or document) so it's
+        // correct relative to the path we just built.
         let idx = 0;
         try {
-            const matches = Array.from(document.querySelectorAll(rawPath));
-            const pos     = matches.indexOf(originalEl);
+            const searchRoot = anchorElement ?? document;
+            const matches = Array.from(searchRoot.querySelectorAll(
+                anchorElement
+                    ? segments.slice(1).join(' > ') || segments[segments.length - 1]
+                    : rawPath
+            ));
+            const pos = matches.indexOf(originalEl);
             if (pos >= 0) idx = pos;
         } catch (_) { /* malformed path — idx stays 0 */ }
 
@@ -271,14 +311,14 @@
     // LIGHTWEIGHT ATTRIBUTE SELECTOR (hover preview only)
     // ═══════════════════════════════════════════════════════════════
     function buildUiPathSelector(element) {
-        const tag        = element.tagName.toUpperCase();
+        const tag = element.tagName.toUpperCase();
         const attributes = [];
 
-        if (element.id && !isVolatileId(element.id))    attributes.push(`id='${escapeXml(element.id)}'`);
-        if (element.name)                                attributes.push(`name='${escapeXml(element.name)}'`);
-        if (element.type)                                attributes.push(`type='${escapeXml(element.type)}'`);
-        if (element.getAttribute('role'))                attributes.push(`role='${escapeXml(element.getAttribute('role'))}'`);
-        if (element.getAttribute('aria-label'))          attributes.push(`aria-label='${escapeXml(element.getAttribute('aria-label'))}'`);
+        if (element.id && !isVolatileId(element.id)) attributes.push(`id='${escapeXml(element.id)}'`);
+        if (element.name) attributes.push(`name='${escapeXml(element.name)}'`);
+        if (element.type) attributes.push(`type='${escapeXml(element.type)}'`);
+        if (element.getAttribute('role')) attributes.push(`role='${escapeXml(element.getAttribute('role'))}'`);
+        if (element.getAttribute('aria-label')) attributes.push(`aria-label='${escapeXml(element.getAttribute('aria-label'))}'`);
 
         const text = (element.innerText || element.textContent || '').trim().replace(/\s+/g, ' ');
         if (text && text.length > 0 && text.length <= 80) {
@@ -294,7 +334,7 @@
     // ═══════════════════════════════════════════════════════════════
     function isVolatileId(idValue) {
         if (!idValue || typeof idValue !== 'string') return true;
-        if (idValue.length > 64)  return true;
+        if (idValue.length > 64) return true;
         if (/^\d+$/.test(idValue)) return true;
 
         const patterns = [
@@ -308,6 +348,8 @@
             /^ng-[a-z]+-\d+/i,
             /^__BVID__/,
             /[A-Za-z0-9]{20,}/,
+            // GUID / UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
         ];
         return patterns.some(re => re.test(idValue));
     }
@@ -341,12 +383,12 @@
         // ── Tier 1: Structural CSS path ───────────────────────────
         if (attrs['css-selector']) {
             // Unescape &gt; → > so querySelectorAll receives a valid CSS string
-            const rawCss  = attrs['css-selector']
-                .replace(/&gt;/g,  '>')
-                .replace(/&lt;/g,  '<')
+            const rawCss = attrs['css-selector']
+                .replace(/&gt;/g, '>')
+                .replace(/&lt;/g, '<')
                 .replace(/&amp;/g, '&');
 
-            const idSegment      = rawCss.match(/#([^\s>+~[:.]+)/)?.[1] ?? '';
+            const idSegment = rawCss.match(/#([^\s>+~[:.]+)/)?.[1] ?? '';
             const skipStrictPath = idSegment && isVolatileId(idSegment);
 
             if (!skipStrictPath) {
@@ -377,7 +419,7 @@
         // NOTE: Never land on a type=file input unless the selector explicitly asks for one —
         //       programmatic value assignment on file inputs throws a security error.
         {
-            const tagLower    = attrs.tag.toLowerCase();
+            const tagLower = attrs.tag.toLowerCase();
             const selectorType = (attrs.type || '').toLowerCase();
             // Append :not([type=file]) for input elements when the selector doesn't target a file picker
             const fileExclusion = (tagLower === 'input' && selectorType !== 'file') ? ':not([type="file"])' : '';
@@ -393,9 +435,9 @@
             }
 
             // Build compound selector from remaining stable attributes
-            if (attrs.name)          cssTier2 += `[name="${CSS.escape(attrs.name)}"]`;
-            if (attrs.type)          cssTier2 += `[type="${CSS.escape(attrs.type)}"]`;
-            if (attrs.role)          cssTier2 += `[role="${CSS.escape(attrs.role)}"]`;
+            if (attrs.name) cssTier2 += `[name="${CSS.escape(attrs.name)}"]`;
+            if (attrs.type) cssTier2 += `[type="${CSS.escape(attrs.type)}"]`;
+            if (attrs.role) cssTier2 += `[role="${CSS.escape(attrs.role)}"]`;
             if (attrs['aria-label']) cssTier2 += `[aria-label="${CSS.escape(attrs['aria-label'])}"]`;
             if (attrs['data-testid']) cssTier2 += `[data-testid="${CSS.escape(attrs['data-testid'])}"]`;
 
@@ -423,10 +465,10 @@
 
         // ── Tier 3: Tag + aaname text / positional idx ────────────
         {
-            const tagLower     = attrs.tag.toLowerCase();
+            const tagLower = attrs.tag.toLowerCase();
             const selectorType = (attrs.type || '').toLowerCase();
             // Exclude file inputs unless the selector explicitly targets one
-            const fileGuard    = (tagLower === 'input' && selectorType !== 'file')
+            const fileGuard = (tagLower === 'input' && selectorType !== 'file')
                 ? ':not([type="file"])'
                 : '';
             let candidates = Array.from(document.querySelectorAll(tagLower + fileGuard));
@@ -455,9 +497,174 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // RUNTIME — GET_ELEMENT_COUNT
+    //
+    // Counts elements matching cssSelector within an optional
+    // scopeSelector container (or document when omitted).
+    // Scoping prevents cross-section bleed on pages with multiple
+    // repeating regions — e.g. several Amazon carousels sharing
+    // the same li class name.
+    //
+    // Request:  { action, cssSelector, scopeSelector? }
+    // Response: { action:'GET_ELEMENT_COUNT_RESPONSE', success, count }
+    // ═══════════════════════════════════════════════════════════════
+    function handleGetElementCount(message) {
+        try {
+            const { cssSelector, scopeSelector, transactionId } = message;
+
+            if (!cssSelector) {
+                chrome.runtime.sendMessage({
+                    action: 'GET_ELEMENT_COUNT_RESPONSE',
+                    transactionId,
+                    success: false,
+                    error: 'cssSelector is required'
+                });
+                return;
+            }
+
+            const root = resolveScope(scopeSelector);
+            if (!root) {
+                chrome.runtime.sendMessage({
+                    action: 'GET_ELEMENT_COUNT_RESPONSE',
+                    transactionId,
+                    success: false,
+                    error: `Scope element not found for selector: "${scopeSelector}"`
+                });
+                return;
+            }
+
+            const count = root.querySelectorAll(cssSelector).length;
+            console.log(`[GlassLinq Content] GET_ELEMENT_COUNT css="${cssSelector}" scope="${scopeSelector || 'document'}" → ${count}`);
+
+            chrome.runtime.sendMessage({
+                action: 'GET_ELEMENT_COUNT_RESPONSE',
+                transactionId,
+                success: true,
+                count
+            });
+
+        } catch (err) {
+            console.error('[GlassLinq Content] GET_ELEMENT_COUNT error:', err);
+            chrome.runtime.sendMessage({
+                action: 'GET_ELEMENT_COUNT_RESPONSE',
+                transactionId: message.transactionId,
+                success: false,
+                error: err.message
+            });
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // RUNTIME — GET_ELEMENT_ATTRIBUTE
+    //
+    // Reads a named attribute from the element at position [idx]
+    // within querySelectorAll(cssSelector) scoped to scopeSelector.
+    // "innerText" / "text" are treated as pseudo-attributes and
+    // read via the innerText property instead of getAttribute().
+    //
+    // Request:  { action, cssSelector, scopeSelector?, idx, attribute }
+    // Response: { action:'GET_ELEMENT_ATTRIBUTE_RESPONSE', success, value }
+    // ═══════════════════════════════════════════════════════════════
+    function handleGetElementAttribute(message) {
+        try {
+            const { cssSelector, scopeSelector, idx, attribute, transactionId } = message;
+
+            if (!cssSelector || idx === undefined || !attribute) {
+                chrome.runtime.sendMessage({
+                    action: 'GET_ELEMENT_ATTRIBUTE_RESPONSE',
+                    transactionId,
+                    success: false,
+                    error: 'cssSelector, idx and attribute are all required'
+                });
+                return;
+            }
+
+            const root = resolveScope(scopeSelector);
+            if (!root) {
+                chrome.runtime.sendMessage({
+                    action: 'GET_ELEMENT_ATTRIBUTE_RESPONSE',
+                    transactionId,
+                    success: false,
+                    error: `Scope element not found for selector: "${scopeSelector}"`
+                });
+                return;
+            }
+
+            const elements = Array.from(root.querySelectorAll(cssSelector));
+
+            if (idx < 0 || idx >= elements.length) {
+                chrome.runtime.sendMessage({
+                    action: 'GET_ELEMENT_ATTRIBUTE_RESPONSE',
+                    transactionId,
+                    success: false,
+                    error: `Index ${idx} out of range (found ${elements.length} elements)`
+                });
+                return;
+            }
+
+            const el = elements[idx];
+            const key = attribute.toLowerCase();
+            let value;
+
+            if (key === 'innertext' || key === 'text') {
+                // innerText respects CSS visibility and gives clean rendered text
+                value = (el.innerText ?? el.textContent ?? '').trim();
+            } else if (key === 'href' || key === 'src') {
+                // Use the resolved absolute URL rather than the raw attribute string
+                value = el[attribute] ?? el.getAttribute(attribute) ?? '';
+            } else if (key === 'url') {
+                // Walk up the DOM to find the nearest <a> ancestor and return its
+                // absolute href — mirrors UiPath's "URL" property for img elements
+                // that are wrapped in a product-page link.
+                const anchor = el.closest('a');
+                value = anchor ? (anchor.href ?? anchor.getAttribute('href') ?? '') : '';
+            } else if (key === 'alt') {
+                // alt is a standard attribute but surfaced explicitly for clarity
+                value = el.getAttribute('alt') ?? '';
+            } else {
+                value = el.getAttribute(attribute) ?? el[attribute] ?? '';
+            }
+
+            console.log(`[GlassLinq Content] GET_ELEMENT_ATTRIBUTE css="${cssSelector}" idx=${idx} attr="${attribute}" → "${value}"`);
+
+            chrome.runtime.sendMessage({
+                action: 'GET_ELEMENT_ATTRIBUTE_RESPONSE',
+                transactionId,
+                success: true,
+                value: String(value).trim()
+            });
+
+        } catch (err) {
+            console.error('[GlassLinq Content] GET_ELEMENT_ATTRIBUTE error:', err);
+            chrome.runtime.sendMessage({
+                action: 'GET_ELEMENT_ATTRIBUTE_RESPONSE',
+                transactionId: message.transactionId,
+                success: false,
+                error: err.message
+            });
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SCOPE RESOLVER
+    //
+    // Returns the DOM node to use as the querySelectorAll root.
+    //   blank / null  → document (search the whole page)
+    //   found node    → that specific container element
+    //   no match      → null  (caller reports error)
+    // ═══════════════════════════════════════════════════════════════
+    function resolveScope(scopeSelector) {
+        if (!scopeSelector || scopeSelector.trim() === '') return document;
+        const el = document.querySelector(scopeSelector);
+        if (!el) console.warn(`[GlassLinq Content] resolveScope: no match for "${scopeSelector}"`);
+        return el;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // RUNTIME — CLICK
     // ═══════════════════════════════════════════════════════════════
     function handleClick(message) {
+
         console.log('[GlassLinq Content] Executing CLICK:', message);
 
         try {
@@ -468,10 +675,12 @@
                 return;
             }
 
-            const mode      = message.mode      || 'simulate';
+            const mode = message.mode || 'simulate';
             const clickType = message.clickType || 'CLICK_SINGLE';
 
             const element = resolveElement(selector);
+
+            console.log('[GlassLinq Debug] Resolved:', element.tagName, element.outerHTML.substring(0, 300));
 
             if (!element) {
                 sendClickResponse(message, false,
@@ -489,14 +698,14 @@
                 const originX = window.screenX + window.scrollX;
                 const originY = window.screenY + window.scrollY;
                 chrome.runtime.sendMessage({
-                    action:        'CLICK_RESPONSE',
+                    action: 'CLICK_RESPONSE',
                     transactionId: message.transactionId,
-                    success:       true,
-                    screenX:       originX + rect.left,
-                    screenY:       originY + rect.top,
-                    width:         rect.width,
-                    height:        rect.height,
-                    timestamp:     Date.now()
+                    success: true,
+                    screenX: originX + rect.left,
+                    screenY: originY + rect.top,
+                    width: rect.width,
+                    height: rect.height,
+                    timestamp: Date.now()
                 });
             } else {
                 dispatchDomClick(element, clickType);
@@ -507,16 +716,17 @@
             console.error('[GlassLinq Content] CLICK error:', error);
             sendClickResponse(message, false, error.message);
         }
+
     }
 
     function sendClickResponse(message, success, reason) {
         const payload = {
-            action:        'CLICK_RESPONSE',
+            action: 'CLICK_RESPONSE',
             transactionId: message.transactionId,
             success
         };
         if (!success && reason) payload.reason = reason;
-        if (success)            payload.timestamp = Date.now();
+        if (success) payload.timestamp = Date.now();
         chrome.runtime.sendMessage(payload);
     }
 
@@ -562,12 +772,12 @@
 
     function sendGetTextResponse(message, success, text, error) {
         const payload = {
-            action:        'GET_TEXT_RESPONSE',
+            action: 'GET_TEXT_RESPONSE',
             transactionId: message.transactionId,
             success
         };
         if (success) { payload.text = text; payload.timestamp = Date.now(); }
-        else         { payload.error = error; }
+        else { payload.error = error; }
         chrome.runtime.sendMessage(payload);
     }
 
@@ -605,10 +815,10 @@
 
             element.focus();
 
-            const prototype        = element.tagName === 'TEXTAREA'
+            const prototype = element.tagName === 'TEXTAREA'
                 ? window.HTMLTextAreaElement.prototype
                 : window.HTMLInputElement.prototype;
-            const valueDescriptor  = Object.getOwnPropertyDescriptor(prototype, 'value');
+            const valueDescriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
 
             if (!valueDescriptor || !valueDescriptor.set) {
                 throw new Error('Target element does not support native value properties.');
@@ -622,7 +832,7 @@
             }
 
             nativeInputSetter.call(element, message.text || '');
-            element.dispatchEvent(new Event('input',  { bubbles: true }));
+            element.dispatchEvent(new Event('input', { bubbles: true }));
             element.dispatchEvent(new Event('change', { bubbles: true }));
 
             // Trigger MUI / combobox dropdowns
@@ -643,12 +853,12 @@
 
     function sendTypeIntoResponse(message, success, error) {
         const payload = {
-            action:        'TYPE_INTO_RESPONSE',
+            action: 'TYPE_INTO_RESPONSE',
             transactionId: message.transactionId,
             success
         };
         if (success) payload.timestamp = Date.now();
-        else         payload.error = error;
+        else payload.error = error;
         chrome.runtime.sendMessage(payload);
     }
 
@@ -664,8 +874,8 @@
         switch (clickType) {
             case 'CLICK_DOUBLE':
                 element.dispatchEvent(new MouseEvent('mousedown', init));
-                element.dispatchEvent(new MouseEvent('mouseup',   init));
-                element.dispatchEvent(new MouseEvent('click',     init));
+                element.dispatchEvent(new MouseEvent('mouseup', init));
+                element.dispatchEvent(new MouseEvent('click', init));
                 element.dispatchEvent(new MouseEvent('click', { ...init, detail: 2 }));
                 break;
             case 'CLICK_DOWN':
@@ -677,9 +887,13 @@
             case 'CLICK_SINGLE':
             default:
                 element.dispatchEvent(new MouseEvent('mousedown', init));
-                element.dispatchEvent(new MouseEvent('mouseup',   init));
-                element.dispatchEvent(new MouseEvent('click',     init));
-                if (typeof element.click === 'function') element.click();
+                element.dispatchEvent(new MouseEvent('mouseup', init));
+                element.dispatchEvent(new MouseEvent('click', init));
+                element.click();
+                if (element.hasAttribute('aria-expanded')) {
+                    const details = element.closest('details');
+                    if (details) details.open = !details.open;
+                }
                 break;
         }
     }
@@ -688,8 +902,8 @@
     // SHADOW DOM PIERCE
     // ═══════════════════════════════════════════════════════════════
     function querySelectorDeep(cssPath) {
-        const parts    = cssPath.split('>').map(s => s.trim());
-        let contexts   = [document];
+        const parts = cssPath.split('>').map(s => s.trim());
+        let contexts = [document];
 
         for (const part of parts) {
             const next = [];
@@ -730,11 +944,11 @@
     function escapeXml(text) {
         if (!text) return '';
         return String(text)
-            .replace(/&/g,  '&amp;')
-            .replace(/</g,  '&lt;')
-            .replace(/>/g,  '&gt;')
-            .replace(/"/g,  '&quot;')
-            .replace(/'/g,  '&apos;');
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&apos;');
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -784,22 +998,22 @@
         }
 
         // Rule 4: geometric proximity
-        const candidates  = document.querySelectorAll('label, span, th, td, p, div.form-label');
+        const candidates = document.querySelectorAll('label, span, th, td, p, div.form-label');
         let closestAnchor = null;
-        let minDistance   = 250;
-        const inputRect   = clickedElement.getBoundingClientRect();
+        let minDistance = 250;
+        const inputRect = clickedElement.getBoundingClientRect();
         const inputCenter = {
-            x: inputRect.left + inputRect.width  / 2,
-            y: inputRect.top  + inputRect.height / 2
+            x: inputRect.left + inputRect.width / 2,
+            y: inputRect.top + inputRect.height / 2
         };
 
         candidates.forEach(candidate => {
             const text = candidate.innerText ? candidate.innerText.trim() : '';
             if (!text || text.length > 40 || candidate.contains(clickedElement)) return;
 
-            const r  = candidate.getBoundingClientRect();
-            const cx = r.left + r.width  / 2;
-            const cy = r.top  + r.height / 2;
+            const r = candidate.getBoundingClientRect();
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
 
             const deltaX = inputCenter.x - cx;
             const deltaY = inputCenter.y - cy;
@@ -811,7 +1025,7 @@
             if (deltaX > 0 && Math.abs(deltaY) < 20) distance *= 0.75;
 
             if (distance < minDistance) {
-                minDistance   = distance;
+                minDistance = distance;
                 closestAnchor = candidate;
             }
         });

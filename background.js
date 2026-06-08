@@ -2,65 +2,88 @@
 let nativePort = null;
 let reconnectTimeout = null;
 
+// Sends a message to a tab, auto-injecting content.js if the receiving
+// end doesn't exist yet (e.g. page was loaded before the extension was installed).
+function sendToTab(tabId, msg) {
+    console.log(`[GlassLinq] Sending ${msg.action} to tab ${tabId}`);
+    chrome.tabs.sendMessage(tabId, msg).catch((err) => {
+        if (err.message && err.message.includes("Receiving end does not exist")) {
+            console.warn(`[GlassLinq] Content script missing on tab ${tabId}, injecting...`);
+            chrome.scripting.executeScript({
+                target: { tabId },
+                files: ['content.js']
+            }).then(() => {
+                setTimeout(() => {
+                    chrome.tabs.sendMessage(tabId, msg).catch(retryErr => {
+                        console.error(`[GlassLinq] Retry failed on tab ${tabId}:`, retryErr.message);
+                    });
+                }, 150);
+            }).catch(injectErr => {
+                console.error(`[GlassLinq] Inject failed on tab ${tabId}:`, injectErr.message);
+            });
+        } else {
+            console.error(`[GlassLinq] sendToTab error on tab ${tabId}:`, err.message);
+        }
+    });
+}
+
 function connectNative() {
     if (nativePort) return nativePort;
 
     console.log('[GlassLinq] Connecting to Bridge...');
-    
+
     try {
         nativePort = chrome.runtime.connectNative('com.glasslinq.bridge');
 
-// background.js
-nativePort.onMessage.addListener((msg) => {
-    console.log('[GlassLinq] Received from Bridge:', msg);
+        // background.js
+        nativePort.onMessage.addListener((msg) => {
+            console.log('[GlassLinq] Received from Bridge:', msg);
 
-    // Process both design-time spying actions AND runtime execution actions
-    if (["web_spy_request", "start_web_spy", "stop_web_spy", "GET_TEXT", "CLICK", "TYPE_INTO"].includes(msg.action)) {
-        
-        // Query the active tab across ALL windows to ensure focus shift doesn't break target matching
-        chrome.tabs.query({ active: true }, (tabs) => {
-            if (!tabs || tabs.length === 0) {
-                console.warn("[GlassLinq] No active browser tab found to receive command");
-                return;
+            // Spy actions (design-time): target the active tab — the user is
+            // looking at the page they want to spy on.
+            const spyActions = ["web_spy_request", "start_web_spy", "stop_web_spy"];
+
+            // Runtime execution actions: Studio has OS focus, so Chrome tabs are
+            // NOT "active". Broadcast to ALL eligible tabs so the correct page
+            // receives the command regardless of which window is in the foreground.
+            const runtimeExecutionActions = ["GET_TEXT", "CLICK", "TYPE_INTO",
+                "GET_ELEMENT_COUNT", "GET_ELEMENT_ATTRIBUTE"];
+
+            if (spyActions.includes(msg.action)) {
+                // Design-time: prefer the active tab in the current Chrome window,
+                // fall back to any active tab across all windows.
+                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                    const targetTab = (tabs || []).find(
+                        t => t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('edge://')
+                    );
+                    if (targetTab) {
+                        sendToTab(targetTab.id, msg);
+                    } else {
+                        chrome.tabs.query({ active: true }, (allActiveTabs) => {
+                            const fallback = (allActiveTabs || []).find(
+                                t => t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('edge://')
+                            );
+                            if (fallback) sendToTab(fallback.id, msg);
+                            else console.warn("[GlassLinq] No eligible active tab for spy action:", msg.action);
+                        });
+                    }
+                });
+
+            } else if (runtimeExecutionActions.includes(msg.action)) {
+                // Runtime: broadcast to ALL eligible tabs.
+                chrome.tabs.query({}, (tabs) => {
+                    const eligibleTabs = (tabs || []).filter(
+                        t => t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('edge://')
+                    );
+                    if (eligibleTabs.length === 0) {
+                        console.warn("[GlassLinq] No eligible tabs for runtime action:", msg.action);
+                        return;
+                    }
+                    console.log(`[GlassLinq] Broadcasting ${msg.action} to ${eligibleTabs.length} tab(s)`);
+                    eligibleTabs.forEach(tab => sendToTab(tab.id, msg));
+                });
             }
-
-            // Find an eligible web tab (ignore chrome:// internal and restricted settings tabs)
-            const targetTab = tabs.find(t => t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('edge://'));
-            
-            if (!targetTab) {
-                console.warn("[GlassLinq] Target tab is restricted or invalid:", tabs[0]?.url);
-                return;
-            }
-
-            console.log(`[GlassLinq] Attempting to send command ${msg.action} to Tab ${targetTab.id}`);
-
-            // Try sending the message normally
-            chrome.tabs.sendMessage(targetTab.id, msg).catch((err) => {
-                // If "Receiving end does not exist", programmatic injection is required
-                if (err.message.includes("Receiving end does not exist")) {
-                    console.warn(`[GlassLinq] Content script missing on Tab ${targetTab.id}. Dynamically injecting content.js...`);
-
-                    // Script Injection via scripting API (Manifest V3 style standard compatibility)
-                    chrome.scripting.executeScript({
-                        target: { tabId: targetTab.id },
-                        files: ['content.js']
-                    }).then(() => {
-                        // Small delay to allow initialization, then retry sending the payload
-                        setTimeout(() => {
-                            chrome.tabs.sendMessage(targetTab.id, msg).catch(retryErr => {
-                                console.error("[GlassLinq] Dynamic retry failed:", retryErr.message);
-                            });
-                        }, 150);
-                    }).catch(injectErr => {
-                        console.error("[GlassLinq] Critical error inject failed:", injectErr.message);
-                    });
-                } else {
-                    console.error("[GlassLinq] Content script unreachable due to:", err.message);
-                }
-            });
         });
-    }
-});
         nativePort.onDisconnect.addListener(() => {
             console.warn('[GlassLinq] Bridge Disconnected');
             nativePort = null;
@@ -68,7 +91,7 @@ nativePort.onMessage.addListener((msg) => {
             // Safety Switch: Tell all tabs to stop highlighting if bridge is lost
             chrome.tabs.query({}, (tabs) => {
                 tabs.forEach(tab => {
-                    chrome.tabs.sendMessage(tab.id, { action: "stop_web_spy" }).catch(() => {});
+                    chrome.tabs.sendMessage(tab.id, { action: "stop_web_spy" }).catch(() => { });
                 });
             });
 
@@ -95,8 +118,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[GlassLinq] Message from page:', message);
 
     const runtimeActions = [
-        "element_hovered", "element_captured", 
-        "GET_TEXT_RESPONSE", "CLICK_RESPONSE", "TYPE_INTO_RESPONSE"
+        "element_hovered", "element_captured",
+        "GET_TEXT_RESPONSE", "CLICK_RESPONSE", "TYPE_INTO_RESPONSE",
+        "GET_ELEMENT_COUNT_RESPONSE", "GET_ELEMENT_ATTRIBUTE_RESPONSE"
     ];
 
     if (runtimeActions.includes(message.action)) {
@@ -112,7 +136,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
         }
     }
-    return true; 
+    return true;
 });
 
 // Lifecycle events
