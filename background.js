@@ -47,7 +47,7 @@ function connectNative() {
             // NOT "active". Broadcast to ALL eligible tabs so the correct page
             // receives the command regardless of which window is in the foreground.
             const runtimeExecutionActions = ["GET_TEXT", "CLICK", "TYPE_INTO",
-                "GET_ELEMENT_COUNT", "GET_ELEMENT_ATTRIBUTE"];
+                "GET_ELEMENT_COUNT", "GET_ELEMENT_ATTRIBUTE", "GET_TABLE_DATA"];
 
             if (spyActions.includes(msg.action)) {
                 // Design-time: prefer the active tab in the current Chrome window,
@@ -120,7 +120,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const runtimeActions = [
         "element_hovered", "element_captured",
         "GET_TEXT_RESPONSE", "CLICK_RESPONSE", "TYPE_INTO_RESPONSE",
-        "GET_ELEMENT_COUNT_RESPONSE", "GET_ELEMENT_ATTRIBUTE_RESPONSE"
+        "GET_ELEMENT_COUNT_RESPONSE", "GET_ELEMENT_ATTRIBUTE_RESPONSE",
+        "GET_TABLE_DATA_RESPONSE"
     ];
 
     if (runtimeActions.includes(message.action)) {

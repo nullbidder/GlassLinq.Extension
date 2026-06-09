@@ -41,6 +41,7 @@
         else if (message.action === 'TYPE_INTO') { handleTypeInto(message); }
         else if (message.action === 'GET_ELEMENT_COUNT') { handleGetElementCount(message); }
         else if (message.action === 'GET_ELEMENT_ATTRIBUTE') { handleGetElementAttribute(message); }
+        else if (message.action === 'GET_TABLE_DATA') { handleGetTableData(message); }
 
         return false;
     }
@@ -128,7 +129,7 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // CLICK CAPTURE — emit distinct properties
+    // CLICK CAPTURE — emit unified <webctrl /> selector
     // ═══════════════════════════════════════════════════════════════
     function onClickCapture(event) {
         if (!isSpying) return;
@@ -138,22 +139,28 @@
         const element = event.target;
         console.log('[GlassLinq Content] Element CAPTURED:', element);
 
-        // 1. Build your lightweight tag + attribute fallback selector
-        const lightweightSelector = buildUiPathSelector(element);
-
-        // 2. Build the structural, robust tier-resolved selector 
+        // Build the single unified XML selector tag
         const unifiedSelector = buildUnifiedSelector(element);
 
+        // Anchor (proximity label / for= label)
         const anchorSelector = findWebAnchor(element);
+
+        // Extract the raw (unescaped) CSS path so C# consumers never need to
+        // decode &gt; entities themselves.  buildCssPath is called again here
+        // because buildUnifiedSelector doesn't expose rawPath externally.
+        // The second call is cheap — same DOM walk, negligible cost at capture time.
         const { rawPath: rawCssPath } = buildCssPath(element);
 
         captureLock = true;
 
         chrome.runtime.sendMessage({
             action: 'element_captured',
-            selector: lightweightSelector, // Changing this fixes your main Selector panel property!
+            selector: unifiedSelector,   // ← the ONE unified <webctrl … /> tag
             anchorSelector: anchorSelector,
-            cssSelector: unifiedSelector,  // Keeps strict layout path mapping safe in CssSelector field
+            // cssSelector kept for backward compat with SpyOverlayWindow CSS-selector field
+            cssSelector: unifiedSelector,
+            // rawCssSelector: unescaped CSS path ready for querySelectorAll / bridge.
+            // Use this in C# instead of decoding the &gt; entities in css-selector.
             rawCssSelector: rawCssPath,
             tag: element.tagName,
             text: element.textContent?.trim().substring(0, 50) || '',
@@ -168,6 +175,7 @@
 
         stopSpying();
     }
+
     // ═══════════════════════════════════════════════════════════════
     // UNIFIED SELECTOR BUILDER
     //
@@ -612,15 +620,6 @@
             } else if (key === 'href' || key === 'src') {
                 // Use the resolved absolute URL rather than the raw attribute string
                 value = el[attribute] ?? el.getAttribute(attribute) ?? '';
-            } else if (key === 'url') {
-                // Walk up the DOM to find the nearest <a> ancestor and return its
-                // absolute href — mirrors UiPath's "URL" property for img elements
-                // that are wrapped in a product-page link.
-                const anchor = el.closest('a');
-                value = anchor ? (anchor.href ?? anchor.getAttribute('href') ?? '') : '';
-            } else if (key === 'alt') {
-                // alt is a standard attribute but surfaced explicitly for clarity
-                value = el.getAttribute('alt') ?? '';
             } else {
                 value = el.getAttribute(attribute) ?? el[attribute] ?? '';
             }
@@ -638,6 +637,136 @@
             console.error('[GlassLinq Content] GET_ELEMENT_ATTRIBUTE error:', err);
             chrome.runtime.sendMessage({
                 action: 'GET_ELEMENT_ATTRIBUTE_RESPONSE',
+                transactionId: message.transactionId,
+                success: false,
+                error: err.message
+            });
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // RUNTIME — GET_TABLE_DATA
+    //
+    // Walks an HTML table matched by cssSelector and returns every
+    // row as an array of cell text values.
+    //
+    // Request:  { action, cssSelector, includeHeaders? }
+    // Response: { action, success, headers: string[],
+    //             rows: string[][], rowCount, columnCount }
+    //
+    // includeHeaders (default true):
+    //   true  → first row of <th> cells becomes the headers array;
+    //            data rows are <tr> elements that contain <td> cells.
+    //   false → headers array is empty; ALL <tr> rows are treated as data.
+    //
+    // The activity uses headers[] to name DataTable columns and rows[][]
+    // for DataTable rows, giving a faithful replica of the browser table.
+    // ═══════════════════════════════════════════════════════════════
+    function handleGetTableData(message) {
+        const transactionId = message.transactionId;
+        try {
+            const cssSelector = (message.cssSelector || '').trim();
+            const includeHeaders = message.includeHeaders !== false; // default true
+
+            if (!cssSelector) {
+                chrome.runtime.sendMessage({
+                    action: 'GET_TABLE_DATA_RESPONSE',
+                    transactionId,
+                    success: false,
+                    error: 'cssSelector is required'
+                });
+                return;
+            }
+
+            // Resolve the table element — accept <table>, or walk up from any
+            // descendant the user happened to spy (e.g. a <td> or <tbody>).
+            let tableEl = document.querySelector(cssSelector);
+            if (!tableEl) {
+                chrome.runtime.sendMessage({
+                    action: 'GET_TABLE_DATA_RESPONSE',
+                    transactionId,
+                    success: false,
+                    error: `No element found for selector: "${cssSelector}"`
+                });
+                return;
+            }
+
+            // If the user spied a cell or section rather than the <table> itself,
+            // walk up to the nearest ancestor <table>.
+            if (tableEl.tagName !== 'TABLE') {
+                const ancestor = tableEl.closest('table');
+                if (ancestor) tableEl = ancestor;
+                // If there's still no <table>, treat the element as a generic
+                // grid container and extract its direct <tr>-like children.
+            }
+
+            // ── Extract header row ─────────────────────────────────
+            let headers = [];
+            if (includeHeaders) {
+                // Prefer explicit <thead> > <tr> > <th> structure.
+                const thead = tableEl.querySelector('thead');
+                if (thead) {
+                    const headerRow = thead.querySelector('tr');
+                    if (headerRow) {
+                        headers = Array.from(headerRow.querySelectorAll('th, td'))
+                            .map(cell => (cell.innerText ?? cell.textContent ?? '').trim());
+                    }
+                }
+                // Fallback: first <tr> that contains only <th> elements.
+                if (headers.length === 0) {
+                    const firstRow = tableEl.querySelector('tr');
+                    if (firstRow && firstRow.querySelectorAll('th').length > 0) {
+                        headers = Array.from(firstRow.querySelectorAll('th'))
+                            .map(cell => (cell.innerText ?? cell.textContent ?? '').trim());
+                    }
+                }
+            }
+
+            // ── Extract data rows ──────────────────────────────────
+            // Collect all <tr> elements from <tbody>, or from the table directly
+            // if there is no <tbody>. Skip any row that was already captured as
+            // the header row.
+            const allRows = Array.from(tableEl.querySelectorAll('tr'));
+            const headerRowEl = (() => {
+                if (!includeHeaders || headers.length === 0) return null;
+                const thead = tableEl.querySelector('thead tr');
+                if (thead) return thead;
+                // Was the first row used as the header fallback?
+                const firstRow = tableEl.querySelector('tr');
+                if (firstRow && firstRow.querySelectorAll('th').length > 0) return firstRow;
+                return null;
+            })();
+
+            const dataRows = allRows
+                .filter(tr => tr !== headerRowEl)           // skip header row
+                .filter(tr => tr.querySelectorAll('td').length > 0 ||   // has data cells
+                    (!includeHeaders && tr.querySelectorAll('th, td').length > 0))
+                .map(tr =>
+                    Array.from(tr.querySelectorAll('td, th'))
+                        .map(cell => (cell.innerText ?? cell.textContent ?? '').trim())
+                );
+
+            const rowCount = dataRows.length;
+            const columnCount = headers.length > 0
+                ? headers.length
+                : (dataRows[0] ? dataRows[0].length : 0);
+
+            console.log(`[GlassLinq Content] GET_TABLE_DATA css="${cssSelector}" → ${rowCount} rows × ${columnCount} cols`);
+
+            chrome.runtime.sendMessage({
+                action: 'GET_TABLE_DATA_RESPONSE',
+                transactionId,
+                success: true,
+                headers,
+                rows: dataRows,
+                rowCount,
+                columnCount
+            });
+
+        } catch (err) {
+            console.error('[GlassLinq Content] GET_TABLE_DATA error:', err);
+            chrome.runtime.sendMessage({
+                action: 'GET_TABLE_DATA_RESPONSE',
                 transactionId: message.transactionId,
                 success: false,
                 error: err.message
